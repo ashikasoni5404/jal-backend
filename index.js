@@ -19,6 +19,3 @@ app.use("/v1/api/grampanchayat", require('./routes/api/grampanchayat'));
 app.use("/v1/api/user", require('./routes/api/user'));
 
 
-console.log('Account SID:', process.env.TWILIO_ACCOUNT_SID);
-console.log('Auth Token:', process.env.TWILIO_AUTH_TOKEN);
-console.log('Phone Number:', process.env.TWILIO_PHONE_NUMBER);
