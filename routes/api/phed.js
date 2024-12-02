@@ -8,7 +8,7 @@ const bcrypt = require('bcryptjs');
 const generateToken = require('../../middlewear/token')
 const router = express.Router();
 const InventoryPhed = require('../../models/InventoryPhed')
-
+const Grampanchayat = require('../../models/Grampanchayat');
 
 //---------------------------------------
 
@@ -166,6 +166,7 @@ router.put('/addQuantity', async (req, res) => {
       quantityAdded: quantityToAdd,
       updatedQuantity: asset.quantity,
       description, // Add description to edit history
+      creditOrDebit: 'credit',
     });
 
     await asset.save();
@@ -184,14 +185,18 @@ router.put('/addQuantity', async (req, res) => {
   }
 });
 
-// List all assets
-//http://localhost:5050/v1/api/phed/listAssets
+// API to list all assets and populate gramPanchayatId with selected fields
+// http://localhost:5050/v1/api/phed/listAssets
 router.get('/listAssets', async (req, res) => {
   try {
-    // Fetch all assets
-    const assets = await AssetPhed.find();
+    // Fetch all assets and populate gramPanchayatId with specific fields
+    const assets = await AssetPhed.find()
+      .populate({
+        path: 'editHistory.gramPanchayatId',
+        select: 'villageName city district state pincode', // Select only the desired fields
+      });
 
-    // Respond with all assets, including edit history
+    // Respond with all assets, including populated editHistory
     return res.status(200).json({ assets });
   } catch (error) {
     console.error('Error in listAssetsPhed:', error);
@@ -200,7 +205,7 @@ router.get('/listAssets', async (req, res) => {
       error: error.message,
     });
   }
-});
+});;
 
 //---------------------------------------
 
@@ -229,6 +234,8 @@ router.post('/addInventry', async (req, res) => {
           quantityAdded: quantity,
           updatedQuantity: quantity,
           description,
+          creditOrDebit: 'credit', // Transaction is a debit (decrease in quantity)
+
         },
       ],
     });
@@ -271,6 +278,7 @@ router.put('/inventry/updateQuantity', async (req, res) => {
       quantityAdded: quantityToAdd,
       updatedQuantity,
       description,
+      creditOrDebit: 'credit',
     });
 
     const updatedInventory = await inventory.save();
@@ -287,7 +295,7 @@ router.put('/inventry/updateQuantity', async (req, res) => {
 
 //  inventory list
 // http://localhost:5050/v1/api/phed/inventry/list
-// search -- >
+// search -- > ?category=chemical
 router.get('/inventry/list', async (req, res) => {
   const { category } = req.query;
 
@@ -296,7 +304,11 @@ router.get('/inventry/list', async (req, res) => {
     const query = category ? { category } : {};
 
     // Fetch inventory items based on the query
-    const inventoryItems = await InventoryPhed.find(query);
+    const inventoryItems = await InventoryPhed.find(query)
+    .populate({
+      path: 'editHistory.gramPanchayatId',
+      select: 'villageName city district state pincode', // Select only the desired fields
+    });
 
     // Check if any items exist
     if (inventoryItems.length === 0) {
@@ -325,6 +337,284 @@ router.get('/inventry/list', async (req, res) => {
   }
 });
 
+// API to give asset to Gram Panchayat by ID
+// http://localhost:5050/v1/api/phed/asset/give-to-gram/:gramPanchayatId
+router.post('/asset/give-to-gram/:gramPanchayatId', async (req, res) => {
+  const { gramPanchayatId } = req.params;
+  const { assetName, quantity, description, date } = req.body;
+
+  try {
+      // Validate input
+      if (!assetName || !quantity || !description || !date) {
+          return res.status(400).json({ success: false, message: 'Asset name, quantity, description, and date are required.' });
+      }
+
+      // Find the asset by name (assetName is unique)
+      const asset = await AssetPhed.findOne({ name: assetName });
+      if (!asset) {
+          return res.status(404).json({ success: false, message: 'Asset not found.' });
+      }
+
+      // Check if the asset has sufficient quantity
+      if (asset.quantity < quantity) {
+          return res.status(400).json({ success: false, message: `Not enough asset quantity available. Available: ${asset.quantity}, Requested: ${quantity}` });
+      }
+
+      // Find the Gram Panchayat by _id (gramPanchayatId)
+      const gramPanchayat = await Grampanchayat.findById(gramPanchayatId);
+      if (!gramPanchayat) {
+          return res.status(404).json({ success: false, message: 'Gram Panchayat not found.' });
+      }
+
+      // Deduct the asset quantity from the inventory (debit operation)
+      asset.quantity -= quantity;
+
+      // Add an entry to the asset's edit history (decrease in quantity)
+      asset.editHistory.push({
+          quantityAdded: -quantity, // Decrease quantity
+          updatedQuantity: asset.quantity, // New updated quantity
+          description, // Description of the transaction
+          creditOrDebit: 'debit', // Transaction is a debit (decrease in quantity)
+          gramPanchayatId: gramPanchayat._id, // Track which Gram Panchayat received the asset
+      });
+
+      // Save the updated asset document
+      await asset.save();
+
+      // Populate the gramPanchayatId in the editHistory with selected fields
+      const updatedAsset = await AssetPhed.findOne({ name: assetName }).populate({
+          path: 'editHistory.gramPanchayatId',
+          select: 'villageName city district state pincode', // Select the required fields
+      });
+
+      // Respond with success
+      res.status(200).json({
+          success: true,
+          message: `${quantity} ${assetName} given to ${gramPanchayat.name} successfully.`,
+          data: updatedAsset,
+      });
+  } catch (error) {
+      console.error('Error during asset distribution:', error);
+      res.status(500).json({
+          success: false,
+          message: 'Server error.',
+      });
+  }
+});
+
+// API to get asset distribution information for a specific Gram Panchayat by ID
+// http://localhost:5050/v1/api/phed/get-assets-by-gram/:gramPanchayatId
+// http://localhost:5050/v1/api/phed/get-assets-by-gram/674cb0379b6f886bf571f334?search=tap search also 
+router.get('/get-assets-by-gram/:gramPanchayatId', async (req, res) => {
+  const { gramPanchayatId } = req.params;
+  const { search } = req.query;  // Capture the search query parameter
+
+  try {
+      // Find the Gram Panchayat by ID
+      const gramPanchayat = await Grampanchayat.findById(gramPanchayatId);
+      if (!gramPanchayat) {
+          return res.status(404).json({ success: false, message: 'Gram Panchayat not found.' });
+      }
+
+      // Build the query object for AssetPhed based on the presence of 'search' parameter
+      let query = { 'editHistory.gramPanchayatId': gramPanchayatId };
+      
+      if (search) {
+          // If 'search' query is provided, filter assets by name
+          query.name = { $regex: search, $options: 'i' };  // Case-insensitive search
+      }
+
+      // Find all assets that match the query
+      const assets = await AssetPhed.find(query).populate({
+          path: 'editHistory.gramPanchayatId',
+          select: 'villageName city district state pincode', // Populate required Gram Panchayat fields
+      });
+
+      if (!assets.length) {
+          return res.status(404).json({ success: false, message: 'No assets found for this Gram Panchayat.' });
+      }
+
+      // Filter and format the response to only include relevant data for each asset
+      const assetDetails = assets.map(asset => {
+          return {
+              assetName: asset.name,
+              currentQuantity: asset.quantity,
+              // Ensure 'gramPanchayatId' exists before accessing its properties
+              editHistory: asset.editHistory.filter(entry => entry.gramPanchayatId && entry.gramPanchayatId._id.toString() === gramPanchayatId)
+          };
+      });
+
+      // Respond with the asset distribution data
+      res.status(200).json({
+          success: true,
+          message: 'Asset distribution for Gram Panchayat retrieved successfully.',
+          data: {
+              gramPanchayat: {
+                  name: gramPanchayat.name,
+                  villageName: gramPanchayat.villageName,
+                  city: gramPanchayat.city,
+                  district: gramPanchayat.district,
+                  state: gramPanchayat.state,
+                  pincode: gramPanchayat.pincode,
+              },
+              assets: assetDetails,
+          }
+      });
+
+  } catch (error) {
+      console.error('Error fetching asset distribution for Gram Panchayat:', error);
+      res.status(500).json({
+          success: false,
+          message: 'Server error.',
+      });
+  }
+});
+
+//----------------------------
+
+// API to post inventory distribution information for a specific Gram Panchayat by ID
+// http://localhost:5050/v1/api/phed/get-assets-by-gram/:gramPanchayatId
+router.post('/inventory/give-to-gram/:gramPanchayatId', async (req, res) => {
+  const { gramPanchayatId } = req.params;
+  const { inventoryName, quantity, description, date } = req.body;
+
+  try {
+      // Validate input
+      if (!inventoryName || !quantity || !description || !date) {
+          return res.status(400).json({ success: false, message: 'Inventory name, quantity, description, and date are required.' });
+      }
+
+      // Find the inventory by name (inventoryName is unique)
+      const inventory = await InventoryPhed.findOne({ name: inventoryName });
+      if (!inventory) {
+          return res.status(404).json({ success: false, message: 'Inventory not found.' });
+      }
+
+      // Check if the inventory has sufficient quantity
+      if (inventory.quantity < quantity) {
+          return res.status(400).json({ success: false, message: `Not enough inventory quantity available. Available: ${inventory.quantity}, Requested: ${quantity}` });
+      }
+
+      // Find the Gram Panchayat by _id (gramPanchayatId)
+      const gramPanchayat = await Grampanchayat.findById(gramPanchayatId);
+      if (!gramPanchayat) {
+          return res.status(404).json({ success: false, message: 'Gram Panchayat not found.' });
+      }
+
+      // Deduct the inventory quantity (debit operation)
+      inventory.quantity -= quantity;
+
+      // Add an entry to the inventory's edit history (decrease in quantity)
+      inventory.editHistory.push({
+          quantityAdded: -quantity, // Decrease quantity
+          updatedQuantity: inventory.quantity, // New updated quantity
+          description, // Description of the transaction
+          creditOrDebit: 'debit', // Transaction is a debit (decrease in quantity)
+          gramPanchayatId: gramPanchayat._id, // Track which Gram Panchayat received the inventory
+      });
+
+      // Save the updated inventory document
+      await inventory.save();
+
+      // Populate the gramPanchayatId in the editHistory with selected fields
+      const updatedInventory = await InventoryPhed.findOne({ name: inventoryName }).populate({
+          path: 'editHistory.gramPanchayatId',
+          select: 'villageName city district state pincode', // Select the required fields
+          strictPopulate: false // Allow population even if gramPanchayatId is in editHistory schema
+      });
+
+      // Respond with success
+      res.status(200).json({
+          success: true,
+          message: `${quantity} ${inventoryName} given to ${gramPanchayat.name} successfully.`,
+          data: updatedInventory,
+      });
+  } catch (error) {
+      console.error('Error during inventory distribution:', error);
+      res.status(500).json({
+          success: false,
+          message: 'Server error.',
+      });
+  }
+});
+
+// API to get inventory distribution information for a specific Gram Panchayat by ID
+// http://localhost:5050/v1/api/phed//inventory/get-inventory-by-gram/:gramPanchayatId
+router.get('/inventory/get-inventory-by-gram/:gramPanchayatId', async (req, res) => {
+  const { gramPanchayatId } = req.params;
+  const { search } = req.query;  // Capture the search query parameter
+
+  try {
+      // Find the Gram Panchayat by ID
+      const gramPanchayat = await Grampanchayat.findById(gramPanchayatId);
+      if (!gramPanchayat) {
+          return res.status(404).json({ success: false, message: 'Gram Panchayat not found.' });
+      }
+
+      // Build the query object for InventoryPhed based on the presence of 'search' parameter
+      let query = { 'editHistory.gramPanchayatId': gramPanchayatId };
+      
+      if (search) {
+          // If 'search' query is provided, filter inventory by name
+          query.name = { $regex: search, $options: 'i' };  // Case-insensitive search
+      }
+
+      // Find all inventory items that match the query, and populate the gramPanchayatId in editHistory
+      const inventories = await InventoryPhed.find(query).populate({
+          path: 'editHistory.gramPanchayatId',
+          select: 'villageName city district state pincode', // Populate required Gram Panchayat fields
+      });
+
+      if (!inventories || inventories.length === 0) {
+          return res.status(404).json({ success: false, message: 'No inventory items found for this Gram Panchayat.' });
+      }
+
+      // Filter and format the response to only include relevant data for each inventory item
+      const inventoryDetails = inventories.map(inventory => {
+          // Filter the editHistory to only include the entries related to the current Gram Panchayat
+          const filteredEditHistory = inventory.editHistory.filter(entry => 
+              entry.gramPanchayatId && entry.gramPanchayatId._id.toString() === gramPanchayatId
+          );
+
+          return {
+              inventoryName: inventory.name,
+              currentQuantity: inventory.quantity,
+              // Add the filtered history specific to this Gram Panchayat
+              editHistory: filteredEditHistory.map(entry => ({
+                  date: entry.date,
+                  quantityAdded: entry.quantityAdded,
+                  updatedQuantity: entry.updatedQuantity,
+                  description: entry.description,
+                  gramPanchayatId: entry.gramPanchayatId, // Include gramPanchayatId to ensure it’s populated
+              })),
+          };
+      });
+
+      // Respond with the inventory distribution data
+      res.status(200).json({
+          success: true,
+          message: 'Inventory distribution for Gram Panchayat retrieved successfully.',
+          data: {
+              gramPanchayat: {
+                  name: gramPanchayat.name,
+                  villageName: gramPanchayat.villageName,
+                  city: gramPanchayat.city,
+                  district: gramPanchayat.district,
+                  state: gramPanchayat.state,
+                  pincode: gramPanchayat.pincode,
+              },
+              inventories: inventoryDetails,
+          }
+      });
+
+  } catch (error) {
+      console.error('Error fetching inventory distribution for Gram Panchayat:', error);
+      res.status(500).json({
+          success: false,
+          message: 'Server error.',
+      });
+  }
+});
 
 
 

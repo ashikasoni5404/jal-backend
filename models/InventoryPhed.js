@@ -18,6 +18,7 @@ const inventorySchema = new mongoose.Schema({
     default: 0, 
     min: 0 // Ensures quantity cannot be negative
   }, // Current quantity of the inventory item
+  creditOrDebit: { type: String, enum: ['credit', 'debit'] },
   editHistory: [
     {
       date: { 
@@ -37,6 +38,8 @@ const inventorySchema = new mongoose.Schema({
         required: true, 
         trim: true 
       }, // Description of the change
+      creditOrDebit: { type: String, enum: ['credit', 'debit'] },
+      gramPanchayatId: { type: mongoose.Schema.Types.ObjectId, ref: 'Grampanchayat' }, // Add gramPanchayatId to the editHistory
     },
   ],
 }, { 
