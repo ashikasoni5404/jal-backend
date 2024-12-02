@@ -9,6 +9,8 @@ const assetSchema = new mongoose.Schema({
       quantityAdded: Number, // Quantity added or modified
       updatedQuantity: Number, // Quantity after the edit
       description: { type: String, required :true }, // Description of the change
+      creditOrDebit: { type: String, enum: ['credit', 'debit'] },
+      gramPanchayatId: { type: mongoose.Schema.Types.ObjectId, ref: 'Grampanchayat' }
     },
   ],
 });
